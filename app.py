@@ -66,12 +66,20 @@ st.markdown(
 )
 
 # ── Navigation ────────────────────────────────────────────────────────────────
-page = st.radio(
-    "Dashboard",
-    ["Summary", "Provider Price Comparison", "Price Table"],
-    horizontal=True,
-)
+page_options = ["📋 Summary", "📊 Provider Price Comparison", "📄 Price Table"]
+page_keys = ["Summary", "Provider Price Comparison", "Price Table"]
 
+page_cols = st.columns(len(page_options))
+if "active_page" not in st.session_state:
+    st.session_state.active_page = "Summary"
+
+for i, (label, key) in enumerate(zip(page_options, page_keys)):
+    with page_cols[i]:
+        if st.button(label, key=f"nav_{key}", use_container_width=True, type="primary" if st.session_state.active_page == key else "secondary"):
+            st.session_state.active_page = key
+            st.rerun()
+
+page = st.session_state.active_page
 st.markdown("---")
 
 # =============================================================================
@@ -158,7 +166,7 @@ if page == "Summary":
         for col in [prev_col, latest_col]:
             display[col] = display[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "—")
         display["% Change"] = display["% Change"].apply(
-            lambda x: f"{'🟢' if x < 0 else '🔴'} {x:+.1%}" if pd.notna(x) else "—"
+            lambda x: f"{'🟢' if x > 0 else '🔴'} {x:+.1%}" if pd.notna(x) else "—"
         )
 
         st.dataframe(display, use_container_width=True, hide_index=True, height=220)
