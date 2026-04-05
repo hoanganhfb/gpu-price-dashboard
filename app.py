@@ -1,5 +1,3 @@
-# GPU Price Tracker Dashboard
-
 import streamlit as st
 import requests
 import pandas as pd
@@ -7,7 +5,6 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Page config
 st.set_page_config(
     page_title="GPU Price Tracker",
     page_icon="📊",
@@ -15,287 +12,252 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Supabase config
 SUPABASE_URL = "https://kbjnialjdwprwgrfggwa.supabase.co"
 SUPABASE_KEY = "sb_publishable_8H9ZdKjQqS_ip1OjPTjA_g_2PfSehnB"
 
-# Cache data
-@st.cache_data(ttl=300)
-def fetch_gpu_prices(gpu_model=None, days=None):
-    """Fetch GPU prices from Supabase"""
-    headers = {
-        'apikey': SUPABASE_KEY,
-        'Authorization': f'Bearer {SUPABASE_KEY}'
-    }
-    
-    base_url = f"{SUPABASE_URL}/rest/v1/gpu_prices?select=*"
-    
-    if days:
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-        base_url += f"&scraped_at=gte.{cutoff}"
-    
-    if gpu_model:
-        base_url += f"&gpu_model=eq.{gpu_model}"
-    
-    base_url += "&order=scraped_at.desc"
-    
-    response = requests.get(base_url, headers=headers)
-    return response.json()
+TARGET_GPUS = ["H100", "H200", "B200", "B300"]
 
-# Sidebar
+@st.cache_data(ttl=300)
+def fetch_all_data(days=None):
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    url = f"{SUPABASE_URL}/rest/v1/gpu_prices?select=*&order=scraped_at.desc&limit=5000"
+    if days:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        url += f"&scraped_at=gte.{cutoff}"
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200:
+        st.error(f"Failed to fetch data: {r.status_code}")
+        return pd.DataFrame()
+    df = pd.DataFrame(r.json())
+    if df.empty:
+        return df
+    df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce", utc=True)
+    df["price_per_gpu_hour"] = pd.to_numeric(df["price_per_gpu_hour"], errors="coerce")
+    df = df.dropna(subset=["scraped_at", "price_per_gpu_hour"])
+    # Clean provider names (strip markdown artifacts)
+    df["provider"] = df["provider"].str.replace(r"\[([^\]]+)\]\(.*?\)", r"\1", regex=True)
+    df["provider"] = df["provider"].str.replace(r"!\[.*?\]\(.*?\)", "", regex=True).str.strip()
+    return df
+
+
+def get_latest_per_provider_model(df):
+    """Return one row per (provider, gpu_model) — the most recent scrape."""
+    idx = df.groupby(["provider", "gpu_model"])["scraped_at"].idxmax()
+    return df.loc[idx].reset_index(drop=True)
+
+
+def render_gpu_tab(df_model, model_name):
+    if df_model.empty:
+        st.info(f"No data for {model_name}.")
+        return
+
+    latest = get_latest_per_provider_model(df_model)
+    on_demand = latest[latest["billing_type"] == "on-demand"].sort_values("price_per_gpu_hour")
+    reserved = latest[latest["billing_type"] == "reserved"].sort_values("price_per_gpu_hour")
+
+    # ── Key Metrics ──────────────────────────────────────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
+    od_prices = on_demand["price_per_gpu_hour"]
+    with col1:
+        st.metric("Providers tracked", latest["provider"].nunique())
+    with col2:
+        if not od_prices.empty:
+            best = on_demand.iloc[0]
+            st.metric("Cheapest on-demand", f"${best['price_per_gpu_hour']:.2f}/hr", delta=best["provider"])
+        else:
+            st.metric("Cheapest on-demand", "N/A")
+    with col3:
+        if not od_prices.empty:
+            st.metric("Avg on-demand", f"${od_prices.mean():.2f}/hr")
+        else:
+            st.metric("Avg on-demand", "N/A")
+    with col4:
+        if not od_prices.empty:
+            spread = od_prices.max() - od_prices.min()
+            st.metric("Price spread", f"${spread:.2f}/hr")
+        else:
+            st.metric("Price spread", "N/A")
+
+    st.markdown("---")
+
+    # ── Price Comparison Table ────────────────────────────────────────────────
+    st.subheader(f"💰 Current Prices — {model_name}")
+
+    # Build comparison table: one row per provider, columns = billing types
+    pivot = latest.pivot_table(
+        index="provider",
+        columns="billing_type",
+        values="price_per_gpu_hour",
+        aggfunc="min",
+    ).reset_index()
+    pivot.columns.name = None
+
+    # Add GPU model column for context
+    for col in ["on-demand", "reserved", "spot"]:
+        if col not in pivot.columns:
+            pivot[col] = None
+
+    available_billing = [c for c in ["on-demand", "reserved", "spot"] if c in pivot.columns and pivot[c].notna().any()]
+    if available_billing:
+        pivot["cheapest"] = pivot[available_billing].min(axis=1)
+        pivot = pivot.sort_values("cheapest")
+
+    # Format for display
+    display_cols = ["provider"] + available_billing
+    display = pivot[display_cols].copy()
+    for c in available_billing:
+        display[c] = display[c].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "—")
+
+    st.dataframe(display.set_index("provider"), use_container_width=True, height=300)
+
+    st.markdown("---")
+
+    # ── Bar Chart ─────────────────────────────────────────────────────────────
+    st.subheader(f"🏢 Provider Price Comparison — {model_name}")
+
+    if not on_demand.empty:
+        fig = px.bar(
+            on_demand,
+            x="price_per_gpu_hour",
+            y="provider",
+            orientation="h",
+            color="price_per_gpu_hour",
+            color_continuous_scale="Blues_r",
+            text="price_per_gpu_hour",
+            title=f"{model_name} — On-Demand Price by Provider",
+        )
+        fig.update_traces(texttemplate="$%{text:.2f}", textposition="outside")
+        fig.update_layout(
+            height=max(300, len(on_demand) * 32),
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False,
+            coloraxis_showscale=False,
+        )
+        fig.update_xaxes(title_text="$/hr")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No on-demand prices available.")
+
+    st.markdown("---")
+
+    # ── Price Trend Over Time ─────────────────────────────────────────────────
+    st.subheader(f"📈 Price Trends — {model_name}")
+
+    od_df = df_model[df_model["billing_type"] == "on-demand"].copy()
+    if len(od_df["scraped_at"].dt.date.unique()) > 1:
+        # Daily average per provider
+        od_df["date"] = od_df["scraped_at"].dt.date
+        trend = od_df.groupby(["date", "provider"])["price_per_gpu_hour"].mean().reset_index()
+        trend["date"] = pd.to_datetime(trend["date"])
+
+        fig2 = px.line(
+            trend,
+            x="date",
+            y="price_per_gpu_hour",
+            color="provider",
+            title=f"{model_name} — Daily Avg On-Demand Price",
+            markers=True,
+        )
+        fig2.update_layout(
+            height=400,
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        fig2.update_yaxes(title_text="$/hr")
+        fig2.update_xaxes(title_text="Date")
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("Only one scrape date — trend chart will appear once more data is collected.")
+
+    # ── Raw Data ──────────────────────────────────────────────────────────────
+    with st.expander("📋 Raw data"):
+        cols = ["scraped_at", "provider", "gpu_model", "gpu_variant", "price_per_gpu_hour", "billing_type", "num_gpus", "availability"]
+        cols = [c for c in cols if c in df_model.columns]
+        st.dataframe(
+            df_model[cols].sort_values("scraped_at", ascending=False).head(200),
+            use_container_width=True,
+        )
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("📊 GPU Price Tracker")
-st.sidebar.markdown("Monitor cloud GPU pricing trends")
+st.sidebar.markdown("Monitor cloud GPU rental prices across providers.")
 st.sidebar.markdown("---")
 
-# GPU model filter
-gpu_models = ["All", "H100", "H200", "B200", "B300", "RTX 5090"]
-selected_gpu = st.sidebar.selectbox("GPU Model", gpu_models)
-
-# Billing type filter
-billing_types = ["All", "on-demand", "reserved"]
-selected_billing = st.sidebar.selectbox("Billing Type", billing_types)
-
-# Time range
-time_options = {"7 days": 7, "30 days": 30, "All time": None}
-selected_time = st.sidebar.selectbox("Time Range", list(time_options.keys()))
+time_options = {"24 hours": 1, "7 days": 7, "30 days": 30, "All time": None}
+selected_time = st.sidebar.selectbox("Time range", list(time_options.keys()), index=1)
 days_filter = time_options[selected_time]
 
-# Provider filter (only show providers for selected GPU)
-if selected_gpu != "All":
-    all_data = fetch_gpu_prices(gpu_model=selected_gpu)
-    providers = sorted(set([p['provider'] for p in all_data]))
-    selected_providers = st.sidebar.multiselect("Providers", providers, default=providers)
+billing_filter = st.sidebar.selectbox("Billing type", ["on-demand", "reserved", "All"])
+
+df_all = fetch_all_data(days=days_filter)
+
+if not df_all.empty:
+    all_providers = sorted(df_all["provider"].unique())
+    selected_providers = st.sidebar.multiselect("Providers", all_providers, default=all_providers)
 else:
-    all_data = fetch_gpu_prices()
-    providers = sorted(set([p['provider'] for p in all_data]))
-    selected_providers = st.sidebar.multiselect("Providers", providers, default=providers)
+    selected_providers = []
 
-# Fetch data
-if selected_gpu == "All":
-    data = fetch_gpu_prices(days=days_filter)
-else:
-    data = fetch_gpu_prices(gpu_model=selected_gpu, days=days_filter)
+st.sidebar.markdown("---")
+st.sidebar.caption(f"Source: GetDeploying.com  \nPowered by Streamlit + Supabase")
 
-# Filter by providers
-if selected_providers:
-    data = [d for d in data if d['provider'] in selected_providers]
+# ── Main ──────────────────────────────────────────────────────────────────────
+st.title("📊 GPU Cloud Price Tracker")
 
-# Filter by billing type
-if selected_billing != "All":
-    data = [d for d in data if d.get('billing_type') == selected_billing]
-
-# Convert to DataFrame
-df = pd.DataFrame(data)
-
-if df.empty:
-    st.warning("No data found for the selected filters.")
+if df_all.empty:
+    st.warning("No data available. Check your Supabase connection.")
     st.stop()
 
-# Clean provider names (remove markdown)
-df['provider'] = df['provider'].str.replace(r'\[([^\]]+)\]\(.*?\)', r'\1', regex=True)
-df['provider'] = df['provider'].str.replace(r'!\[.*?\]\(.*?\)', '', regex=True)
+# Apply filters
+df = df_all.copy()
+if selected_providers:
+    df = df[df["provider"].isin(selected_providers)]
+if billing_filter != "All":
+    df = df[df["billing_type"] == billing_filter]
 
-# Convert datetime with error handling
-df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
-df = df.dropna(subset=['scraped_at'])
-
-df['price_per_gpu_hour'] = pd.to_numeric(df['price_per_gpu_hour'], errors='coerce')
-df = df.dropna(subset=['price_per_gpu_hour'])
-
-# Main title
-st.title("📊 GPU Cloud Price Tracker")
-st.markdown(f"**Last updated:** {df['scraped_at'].max().strftime('%Y-%m-%d %H:%M UTC')} | **Records:** {len(df):,} price points")
+last_updated = df["scraped_at"].max()
+st.markdown(
+    f"**Last scraped:** {last_updated.strftime('%Y-%m-%d %H:%M UTC')} &nbsp;|&nbsp; "
+    f"**Total records:** {len(df_all):,} &nbsp;|&nbsp; "
+    f"**Providers:** {df_all['provider'].nunique()}"
+)
 st.markdown("---")
 
-# Get latest prices for all providers
-latest_df = df.loc[df.groupby('provider')['scraped_at'].idxmax()]
+# ── Cross-GPU Overview ────────────────────────────────────────────────────────
+st.subheader("🔍 Side-by-Side: Cheapest On-Demand Price per GPU")
 
-# =============================================================================
-# SECTION 1: Current Market Prices Table (TOP)
-# =============================================================================
-st.subheader("💰 Current Market Prices")
+overview_rows = []
+latest_all = get_latest_per_provider_model(df_all)
+od_latest = latest_all[latest_all["billing_type"] == "on-demand"]
 
-# Helper function for highlighting
-def highlight_min_value(val, min_val):
-    try:
-        return 'background-color: #90CAF9' if pd.notna(val) and val == min_val else ''
-    except:
-        return ''
-
-# Create pivot table for billing types
-try:
-    if 'billing_type' in df.columns and df['billing_type'].notna().any():
-        latest_with_billing = latest_df.copy()
-        latest_with_billing['billing_type'] = latest_with_billing['billing_type'].fillna('on-demand')
-        
-        # Pivot to show billing types as columns
-        pivot_df = latest_with_billing.pivot_table(
-            index='provider', 
-            columns='billing_type', 
-            values='price_per_gpu_hour',
-            aggfunc='first'
-        ).reset_index()
-        
-        # Get available billing type columns (exclude 'provider')
-        billing_cols = [col for col in pivot_df.columns if col != 'provider' and col in pivot_df.columns]
-        
-        # Calculate average price across available billing types
-        if billing_cols:
-            pivot_df['avg_price'] = pivot_df[billing_cols].mean(axis=1, skipna=True)
-            pivot_df = pivot_df.sort_values('avg_price')
-            
-            # Find minimum value safely
-            min_val = None
-            for col in billing_cols:
-                col_min = pivot_df[col].min()
-                if pd.notna(col_min) and (min_val is None or col_min < min_val):
-                    min_val = col_min
-            
-            # Convert billing columns to numeric for formatting
-            display_df = pivot_df.copy()
-            for col in billing_cols:
-                display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
-            display_df['avg_price'] = pd.to_numeric(display_df['avg_price'], errors='coerce')
-            
-            if min_val is not None:
-                st.dataframe(
-                    display_df.style.format("{:.2f}", na_rep='N/A').map(lambda x: highlight_min_value(x, min_val)),
-                    use_container_width=True,
-                    height=300
-                )
-            else:
-                st.dataframe(
-                    display_df.style.format("{:.2f}", na_rep='N/A'),
-                    use_container_width=True,
-                    height=300
-                )
-        else:
-            st.warning("No billing type data available.")
+for model in TARGET_GPUS:
+    subset = od_latest[od_latest["gpu_model"] == model]
+    if subset.empty:
+        overview_rows.append({"GPU": model, "Cheapest $/hr": None, "Provider": "No data", "# Providers": 0})
     else:
-        # Fallback if no billing type data
-        st.dataframe(
-            latest_df[['provider', 'price_per_gpu_hour']].sort_values('price_per_gpu_hour'),
-            use_container_width=True
-        )
-except Exception as e:
-    st.error(f"Error displaying prices: {str(e)}")
-    st.dataframe(
-        latest_df[['provider', 'price_per_gpu_hour']].sort_values('price_per_gpu_hour'),
-        use_container_width=True
-    )
+        best = subset.loc[subset["price_per_gpu_hour"].idxmin()]
+        overview_rows.append({
+            "GPU": model,
+            "Cheapest $/hr": best["price_per_gpu_hour"],
+            "Provider": best["provider"],
+            "# Providers": subset["provider"].nunique(),
+        })
+
+overview_df = pd.DataFrame(overview_rows)
+cols_ov = st.columns(len(TARGET_GPUS))
+for i, row in overview_df.iterrows():
+    with cols_ov[i]:
+        price_str = f"${row['Cheapest $/hr']:.2f}/hr" if pd.notna(row["Cheapest $/hr"]) else "N/A"
+        st.metric(row["GPU"], price_str, delta=row["Provider"] if row["Provider"] != "No data" else None)
 
 st.markdown("---")
 
-# =============================================================================
-# SECTION 2: Price Trends Over Time
-# =============================================================================
-st.subheader("📈 Price Trends Over Time")
-
-if len(df) > 1:
-    # Multi-line chart for selected providers
-    fig_trend = px.line(
-        df, 
-        x='scraped_at', 
-        y='price_per_gpu_hour',
-        color='provider',
-        title='GPU Price Trends by Provider',
-        markers=True,
-        hover_data={'scraped_at': '%Y-%m-%d'}
-    )
-    fig_trend.update_layout(
-        height=450, 
-        hovermode='x unified',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-    fig_trend.update_yaxes(title_text='Price ($/hr)')
-    fig_trend.update_xaxes(title_text='Date')
-    st.plotly_chart(fig_trend, use_container_width=True)
-    
-    # Show % change from first to last data point
-    first_date = df['scraped_at'].min()
-    last_date = df['scraped_at'].max()
-    
-    first_prices = df[df['scraped_at'] == first_date].groupby('provider')['price_per_gpu_hour'].first()
-    last_prices = df[df['scraped_at'] == last_date].groupby('provider')['price_per_gpu_hour'].last()
-    
-    changes = ((last_prices - first_prices) / first_prices * 100).round(2)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Price Change (Period Start to End)**")
-        st.write(changes.to_string())
-else:
-    st.info("Not enough data to show trends.")
-
-st.markdown("---")
-
-# =============================================================================
-# SECTION 3: Provider Price Comparison (Bar Chart)
-# =============================================================================
-st.subheader("🏢 Provider Price Comparison")
-
-# Use latest prices only
-latest_prices = latest_df.sort_values('price_per_gpu_hour')
-
-# Create color scale based on price ranking
-colors = [(i / len(latest_prices)) for i in range(len(latest_prices))]
-
-fig_bar = px.bar(
-    latest_prices,
-    x='price_per_gpu_hour',
-    y='provider',
-    orientation='h',
-    title='Current Prices by Provider (Latest Data)',
-    color='price_per_gpu_hour',
-    color_continuous_scale='Blues',
-    text='price_per_gpu_hour'
-)
-fig_bar.update_layout(
-    height=min(500, len(latest_prices) * 30), 
-    yaxis={'categoryorder': 'total ascending'},
-    showlegend=False
-)
-fig_bar.update_xaxes(title_text='Price ($/hr)')
-fig_bar.update_traces(texttemplate='$%{text:.2f}', textposition='outside')
-st.plotly_chart(fig_bar, use_container_width=True)
-
-# =============================================================================
-# SECTION 4: Key Metrics
-# =============================================================================
-st.markdown("---")
-st.subheader("📊 Key Metrics")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    avg_price = df['price_per_gpu_hour'].mean()
-    st.metric("Avg Price", f"${avg_price:.2f}/hr")
-
-with col2:
-    min_price = df['price_per_gpu_hour'].min()
-    cheapest_provider = latest_df.loc[latest_df['price_per_gpu_hour'].idxmin()]['provider']
-    st.metric("Lowest", f"${min_price:.2f}/hr", delta=f"{cheapest_provider}")
-
-with col3:
-    max_price = df['price_per_gpu_hour'].max()
-    st.metric("Highest", f"${max_price:.2f}/hr")
-
-with col4:
-    provider_count = df['provider'].nunique()
-    st.metric("Providers", provider_count)
-
-# =============================================================================
-# SECTION 5: Raw Data
-# =============================================================================
-st.markdown("---")
-with st.expander("📋 View Raw Data"):
-    st.dataframe(
-        df[['scraped_at', 'provider', 'gpu_model', 'gpu_variant', 'price_per_gpu_hour', 'billing_type']]
-          .sort_values('scraped_at', ascending=False)
-          .head(100),
-        use_container_width=True
-    )
-
-# Footer
-st.markdown("---")
-st.caption("Data source: GetDeploying | Updated weekly on Mondays | Powered by Streamlit + Supabase")
+# ── Per-GPU Tabs ──────────────────────────────────────────────────────────────
+tabs = st.tabs(TARGET_GPUS)
+for tab, model in zip(tabs, TARGET_GPUS):
+    with tab:
+        df_model = df[df["gpu_model"] == model]
+        render_gpu_tab(df_model, model)
