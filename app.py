@@ -115,41 +115,64 @@ latest_df = df.loc[df.groupby('provider')['scraped_at'].idxmax()]
 # =============================================================================
 st.subheader("💰 Current Market Prices")
 
+# Helper function for highlighting
+def highlight_min_value(val, min_val):
+    try:
+        return 'background-color: #90CAF9' if pd.notna(val) and val == min_val else ''
+    except:
+        return ''
+
 # Create pivot table for billing types
-if 'billing_type' in df.columns and df['billing_type'].notna().any():
-    latest_with_billing = latest_df.copy()
-    latest_with_billing['billing_type'] = latest_with_billing['billing_type'].fillna('on-demand')
-    
-    # Pivot to show billing types as columns
-    pivot_df = latest_with_billing.pivot_table(
-        index='provider', 
-        columns='billing_type', 
-        values='price_per_gpu_hour',
-        aggfunc='first'
-    ).reset_index()
-    
-    # Get available billing type columns (exclude 'provider')
-    billing_cols = [col for col in pivot_df.columns if col != 'provider' and not pd.isna(pivot_df[col]).all()]
-    
-    # Calculate average price across available billing types
-    if billing_cols:
-        pivot_df['avg_price'] = pivot_df[billing_cols].mean(axis=1, skipna=True)
-        pivot_df = pivot_df.sort_values('avg_price')
+try:
+    if 'billing_type' in df.columns and df['billing_type'].notna().any():
+        latest_with_billing = latest_df.copy()
+        latest_with_billing['billing_type'] = latest_with_billing['billing_type'].fillna('on-demand')
         
-        # Highlight minimum value
-        def highlight_min(val):
-            min_val = pivot_df[billing_cols].min().min()
-            return 'background-color: #90CAF9' if val == min_val else ''
+        # Pivot to show billing types as columns
+        pivot_df = latest_with_billing.pivot_table(
+            index='provider', 
+            columns='billing_type', 
+            values='price_per_gpu_hour',
+            aggfunc='first'
+        ).reset_index()
         
-        st.dataframe(
-            pivot_df.style.format("{:.2f}").applymap(highlight_min),
-            use_container_width=True,
-            height=300
-        )
+        # Get available billing type columns (exclude 'provider')
+        billing_cols = [col for col in pivot_df.columns if col != 'provider' and col in pivot_df.columns]
+        
+        # Calculate average price across available billing types
+        if billing_cols:
+            pivot_df['avg_price'] = pivot_df[billing_cols].mean(axis=1, skipna=True)
+            pivot_df = pivot_df.sort_values('avg_price')
+            
+            # Find minimum value safely
+            min_val = None
+            for col in billing_cols:
+                col_min = pivot_df[col].min()
+                if pd.notna(col_min) and (min_val is None or col_min < min_val):
+                    min_val = col_min
+            
+            if min_val is not None:
+                st.dataframe(
+                    pivot_df.style.format("{:.2f}").applymap(lambda x: highlight_min_value(x, min_val)),
+                    use_container_width=True,
+                    height=300
+                )
+            else:
+                st.dataframe(
+                    pivot_df.style.format("{:.2f}"),
+                    use_container_width=True,
+                    height=300
+                )
+        else:
+            st.warning("No billing type data available.")
     else:
-        st.warning("No billing type data available.")
-else:
-    # Fallback if no billing type data
+        # Fallback if no billing type data
+        st.dataframe(
+            latest_df[['provider', 'price_per_gpu_hour']].sort_values('price_per_gpu_hour'),
+            use_container_width=True
+        )
+except Exception as e:
+    st.error(f"Error displaying prices: {str(e)}")
     st.dataframe(
         latest_df[['provider', 'price_per_gpu_hour']].sort_values('price_per_gpu_hour'),
         use_container_width=True
