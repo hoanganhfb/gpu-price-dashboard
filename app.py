@@ -53,7 +53,7 @@ gpu_models = ["All", "H100", "H200", "B200", "B300", "RTX 5090"]
 selected_gpu = st.sidebar.selectbox("GPU Model", gpu_models)
 
 # Billing type filter
-billing_types = ["All", "on-demand", "reserved", "spot", "custom"]
+billing_types = ["All", "on-demand", "reserved"]
 selected_billing = st.sidebar.selectbox("Billing Type", billing_types)
 
 # Time range
