@@ -128,24 +128,26 @@ if 'billing_type' in df.columns and df['billing_type'].notna().any():
         aggfunc='first'
     ).reset_index()
     
-    # Calculate average price across billing types
-    pivot_df['avg_price'] = pivot_df[['on-demand', 'reserved']].mean(axis=1, skipna=True)
-    pivot_df = pivot_df.sort_values('avg_price')
+    # Get available billing type columns (exclude 'provider')
+    billing_cols = [col for col in pivot_df.columns if col != 'provider' and not pd.isna(pivot_df[col]).all()]
     
-    # Highlight cheapest in each column
-    def highlight_cheapest(col):
-        return ['background-color: #90CAF9' if v == col.name else '' for v in col]
-    
-    # Display table with cheapest highlighted
-    def highlight_min(val):
-        min_val = pivot_df[['on-demand', 'reserved']].min().min()
-        return 'background-color: #90CAF9' if val == min_val else ''
-    
-    st.dataframe(
-        pivot_df.style.format("{:.2f}").applymap(highlight_min),
-        use_container_width=True,
-        height=300
-    )
+    # Calculate average price across available billing types
+    if billing_cols:
+        pivot_df['avg_price'] = pivot_df[billing_cols].mean(axis=1, skipna=True)
+        pivot_df = pivot_df.sort_values('avg_price')
+        
+        # Highlight minimum value
+        def highlight_min(val):
+            min_val = pivot_df[billing_cols].min().min()
+            return 'background-color: #90CAF9' if val == min_val else ''
+        
+        st.dataframe(
+            pivot_df.style.format("{:.2f}").applymap(highlight_min),
+            use_container_width=True,
+            height=300
+        )
+    else:
+        st.warning("No billing type data available.")
 else:
     # Fallback if no billing type data
     st.dataframe(
