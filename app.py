@@ -52,6 +52,10 @@ st.sidebar.markdown("---")
 gpu_models = ["All", "H100", "H200", "B200", "B300", "RTX 5090"]
 selected_gpu = st.sidebar.selectbox("GPU Model", gpu_models)
 
+# Billing type filter
+billing_types = ["All", "on-demand", "reserved", "spot", "custom"]
+selected_billing = st.sidebar.selectbox("Billing Type", billing_types)
+
 # Time range
 time_options = {"7 days": 7, "30 days": 30, "All time": None}
 selected_time = st.sidebar.selectbox("Time Range", list(time_options.keys()))
@@ -76,6 +80,10 @@ else:
 # Filter by providers
 if selected_providers:
     data = [d for d in data if d['provider'] in selected_providers]
+
+# Filter by billing type
+if selected_billing != "All":
+    data = [d for d in data if d.get('billing_type') == selected_billing]
 
 # Convert to DataFrame
 df = pd.DataFrame(data)
