@@ -95,8 +95,13 @@ if df.empty:
 # Clean provider names (remove markdown)
 df['provider'] = df['provider'].str.replace(r'\[([^\]]+)\]\(.*?\)', r'\1', regex=True)
 df['provider'] = df['provider'].str.replace(r'!\[.*?\]\(.*?\)', '', regex=True)
-df['scraped_at'] = pd.to_datetime(df['scraped_at'])
+
+# Convert datetime with error handling
+df['scraped_at'] = pd.to_datetime(df['scraped_at'], errors='coerce')
+df = df.dropna(subset=['scraped_at'])
+
 df['price_per_gpu_hour'] = pd.to_numeric(df['price_per_gpu_hour'], errors='coerce')
+df = df.dropna(subset=['price_per_gpu_hour'])
 
 # Main title
 st.title("📊 GPU Cloud Price Tracker")
