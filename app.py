@@ -153,7 +153,7 @@ try:
             
             if min_val is not None:
                 st.dataframe(
-                    pivot_df.style.format("{:.2f}").applymap(lambda x: highlight_min_value(x, min_val)),
+                    pivot_df.style.format("{:.2f}").map(lambda x: highlight_min_value(x, min_val)),
                     use_container_width=True,
                     height=300
                 )
