@@ -98,72 +98,73 @@ if page == "Summary":
         & (df_all["billing_type"].isin(["On-Demand", "Reserved"]))
     ].copy()
 
-    if prev_date is None:
-        st.info("Need at least 2 scrape dates to show % change.")
+    # ── Date columns logic ────────────────────────────────────────────────────
+    # Fixed baseline dates (always shown)
+    from datetime import date as date_type
+    BASELINE_1 = date_type(2026, 3, 9)
+    BASELINE_2 = date_type(2026, 4, 5)
+
+    all_dates = sorted(df_summary["scraped_at"].dt.date.unique())
+
+    # "This week" = most recent scrape date
+    # "Last week" = second most recent, but only if we have > 2 dates
+    this_week_date = all_dates[-1] if all_dates else None
+    last_week_date = all_dates[-2] if len(all_dates) > 2 else None
+
+    def get_stats(gpu, billing, target_date):
+        if target_date is None:
+            return np.nan, np.nan, 0
+        subset = df_summary[
+            (df_summary["gpu_model"] == gpu)
+            & (df_summary["billing_type"] == billing)
+            & (df_summary["scraped_at"].dt.date == target_date)
+        ]["price_per_gpu_hour"]
+        if len(subset) == 0:
+            return np.nan, np.nan, 0
+        return subset.mean(), subset.median(), len(subset)
 
     rows = []
     for gpu in TARGET_GPUS:
         for billing in ["On-Demand", "Reserved"]:
-            # Latest date stats
-            latest_subset = df_summary[
-                (df_summary["gpu_model"] == gpu)
-                & (df_summary["billing_type"] == billing)
-                & (df_summary["scraped_at"].dt.date == latest_date)
-            ]["price_per_gpu_hour"]
+            b1_mean, b1_median, _ = get_stats(gpu, billing, BASELINE_1)
+            b2_mean, b2_median, _ = get_stats(gpu, billing, BASELINE_2)
+            lw_mean, lw_median, _ = get_stats(gpu, billing, last_week_date)
+            tw_mean, tw_median, tw_n = get_stats(gpu, billing, this_week_date)
 
-            mean_now = latest_subset.mean() if len(latest_subset) > 0 else np.nan
-            median_now = latest_subset.median() if len(latest_subset) > 0 else np.nan
-            n_now = len(latest_subset)
-
-            # Previous date stats
-            if prev_date:
-                prev_subset = df_summary[
-                    (df_summary["gpu_model"] == gpu)
-                    & (df_summary["billing_type"] == billing)
-                    & (df_summary["scraped_at"].dt.date == prev_date)
-                ]["price_per_gpu_hour"]
-                mean_prev = prev_subset.mean() if len(prev_subset) > 0 else np.nan
-                median_prev = prev_subset.median() if len(prev_subset) > 0 else np.nan
-            else:
-                mean_prev = np.nan
-                median_prev = np.nan
-
-            # % change
-            mean_chg = (mean_now - mean_prev) / mean_prev if pd.notna(mean_prev) and mean_prev != 0 else np.nan
-            median_chg = (median_now - median_prev) / median_prev if pd.notna(median_prev) and median_prev != 0 else np.nan
+            # % change: this week vs last week
+            mean_chg = (tw_mean - lw_mean) / lw_mean if pd.notna(lw_mean) and lw_mean != 0 and pd.notna(tw_mean) else np.nan
+            median_chg = (tw_median - lw_median) / lw_median if pd.notna(lw_median) and lw_median != 0 and pd.notna(tw_median) else np.nan
 
             rows.append({
-                "GPU": gpu,
-                "Billing": billing,
-                "Statistic": "Mean",
-                f"{prev_date.strftime('%b %d') if prev_date else 'Prev'}": mean_prev,
-                f"{latest_date.strftime('%b %d')}": mean_now,
-                "% Change": mean_chg,
-                "n": n_now,
+                "GPU": gpu, "Billing": billing, "Statistic": "Mean",
+                "Mar 09": b1_mean, "Apr 05": b2_mean,
+                "Last week": lw_mean, "This week": tw_mean,
+                "% Change": mean_chg, "n": tw_n,
             })
             rows.append({
-                "GPU": gpu,
-                "Billing": billing,
-                "Statistic": "Median",
-                f"{prev_date.strftime('%b %d') if prev_date else 'Prev'}": median_prev,
-                f"{latest_date.strftime('%b %d')}": median_now,
-                "% Change": median_chg,
-                "n": n_now,
+                "GPU": gpu, "Billing": billing, "Statistic": "Median",
+                "Mar 09": b1_median, "Apr 05": b2_median,
+                "Last week": lw_median, "This week": tw_median,
+                "% Change": median_chg, "n": tw_n,
             })
 
     summary_df = pd.DataFrame(rows)
+
+    # Column header with actual dates
+    lw_label = f"Last week ({last_week_date.strftime('%b %d')})" if last_week_date else "Last week"
+    tw_label = f"This week ({this_week_date.strftime('%b %d')})" if this_week_date else "This week"
 
     # Show as per-GPU sections
     for gpu in TARGET_GPUS:
         st.markdown(f"#### {gpu}")
         gpu_df = summary_df[summary_df["GPU"] == gpu].drop(columns=["GPU"]).reset_index(drop=True)
 
-        prev_col = prev_date.strftime('%b %d') if prev_date else 'Prev'
-        latest_col = latest_date.strftime('%b %d')
-
-        # Format for display
         display = gpu_df.copy()
-        for col in [prev_col, latest_col]:
+        # Rename rolling columns to include dates
+        display = display.rename(columns={"Last week": lw_label, "This week": tw_label})
+
+        # Format price columns
+        for col in ["Mar 09", "Apr 05", lw_label, tw_label]:
             display[col] = display[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "—")
         display["% Change"] = display["% Change"].apply(
             lambda x: f"{'🟢' if x > 0 else '🔴'} {x:+.1%}" if pd.notna(x) else "—"
@@ -173,10 +174,11 @@ if page == "Summary":
 
     # ── Quick highlights ──────────────────────────────────────────────────────
     st.markdown("---")
-    st.subheader("🔍 Quick Highlights — Cheapest On-Demand (Latest)")
+    st.subheader("🔍 Quick Highlights — Cheapest On-Demand (This Week)")
 
+    highlight_date = this_week_date or latest_date
     latest_od = df_all[
-        (df_all["scraped_at"].dt.date == latest_date)
+        (df_all["scraped_at"].dt.date == highlight_date)
         & (df_all["billing_type"] == "On-Demand")
         & (~df_all["provider"].isin(EXCLUDED_PROVIDERS))
     ]
@@ -202,9 +204,10 @@ elif page in ("Provider Price Comparison", "Price Table"):
     with col_f2:
         selected_billing = st.selectbox("Billing Type", ["On-Demand", "Reserved"])
 
-    # Filter data: latest date only, selected GPU, selected billing type
+    # Filter data: most recent scrape date, selected GPU, selected billing type
+    most_recent = sorted(df_all["scraped_at"].dt.date.unique())[-1]
     df_filtered = df_all[
-        (df_all["scraped_at"].dt.date == latest_date)
+        (df_all["scraped_at"].dt.date == most_recent)
         & (df_all["gpu_model"] == selected_gpu)
     ].copy()
 
@@ -295,4 +298,4 @@ elif page in ("Provider Price Comparison", "Price Table"):
                 hide_index=True,
             )
 
-            st.caption(f"{len(table)} entries | Data from GetDeploying.com | {latest_date}")
+            st.caption(f"{len(table)} entries | Data from GetDeploying.com | {most_recent}")
