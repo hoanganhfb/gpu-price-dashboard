@@ -136,9 +136,13 @@ if 'billing_type' in df.columns and df['billing_type'].notna().any():
     def highlight_cheapest(col):
         return ['background-color: #90CAF9' if v == col.name else '' for v in col]
     
-    # Display table
+    # Display table with cheapest highlighted
+    def highlight_min(val):
+        min_val = pivot_df[['on-demand', 'reserved']].min().min()
+        return 'background-color: #90CAF9' if val == min_val else ''
+    
     st.dataframe(
-        pivot_df.style.format("{:.2f}").applymap(lambda x: 'background-color: #90CAF9' if x == pivot_df.drop('avg_price', axis=1).min().min() else ''),
+        pivot_df.style.format("{:.2f}").applymap(highlight_min),
         use_container_width=True,
         height=300
     )
