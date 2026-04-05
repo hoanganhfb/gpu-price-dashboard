@@ -151,15 +151,21 @@ try:
                 if pd.notna(col_min) and (min_val is None or col_min < min_val):
                     min_val = col_min
             
+            # Convert billing columns to numeric for formatting
+            display_df = pivot_df.copy()
+            for col in billing_cols:
+                display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
+            display_df['avg_price'] = pd.to_numeric(display_df['avg_price'], errors='coerce')
+            
             if min_val is not None:
                 st.dataframe(
-                    pivot_df.style.format("{:.2f}").map(lambda x: highlight_min_value(x, min_val)),
+                    display_df.style.format("{:.2f}", na_rep='N/A').map(lambda x: highlight_min_value(x, min_val)),
                     use_container_width=True,
                     height=300
                 )
             else:
                 st.dataframe(
-                    pivot_df.style.format("{:.2f}"),
+                    display_df.style.format("{:.2f}", na_rep='N/A'),
                     use_container_width=True,
                     height=300
                 )
