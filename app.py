@@ -20,14 +20,32 @@ EXCLUDED_PROVIDERS = ["AWS", "Google Cloud", "Azure", "Oracle Cloud"]
 
 @st.cache_data(ttl=300)
 def fetch_all_data():
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    url = f"{SUPABASE_URL}/rest/v1/gpu_prices?select=*&order=scraped_at.desc&limit=5000"
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
+    """Fetch all rows from Supabase with pagination (Supabase caps at 1000 per request)."""
+    all_rows = []
+    page_size = 1000
+    offset = 0
+    while True:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Range-Unit": "items",
+            "Range": f"{offset}-{offset + page_size - 1}",
+        }
+        url = f"{SUPABASE_URL}/rest/v1/gpu_prices?select=*&order=scraped_at.desc"
+        r = requests.get(url, headers=headers)
+        if r.status_code not in (200, 206):
+            break
+        batch = r.json()
+        if not batch:
+            break
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+
+    if not all_rows:
         return pd.DataFrame()
-    df = pd.DataFrame(r.json())
-    if df.empty:
-        return df
+    df = pd.DataFrame(all_rows)
     df["scraped_at"] = pd.to_datetime(df["scraped_at"], errors="coerce")
     df["price_per_gpu_hour"] = pd.to_numeric(df["price_per_gpu_hour"], errors="coerce")
     df["total_per_hour"] = pd.to_numeric(df["total_per_hour"], errors="coerce")
